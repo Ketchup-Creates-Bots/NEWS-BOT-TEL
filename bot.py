@@ -13,6 +13,8 @@ from telegram.error import TelegramError
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import utc
 from flask import Flask
+import os
+import threading
 
 
 # Optional OpenAI import - used only if OPENAI_API_KEY is set
@@ -277,9 +279,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-from flask import Flask
-import os
-import threading
+
 
 app = Flask(__name__)
 
@@ -294,6 +294,7 @@ def run_flask():
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     main()
+
 
 
 
