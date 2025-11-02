@@ -7,9 +7,8 @@ import threading
 from datetime import datetime, date
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot, ParseMode, Update
+from telegram import Bot, ParseMode
 from telegram.error import TelegramError
-from telegram.ext import CommandHandler, Dispatcher
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import utc
 from flask import Flask, request
@@ -45,7 +44,19 @@ if not TELEGRAM_TOKEN or TARGET_CHAT_ID == 0:
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# === BAZA DANYCH (deduplikacja) ===
+# --- Set webhook for Telegram ---
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+if RENDER_URL:
+    webhook_url = f"{RENDER_URL}/{TELEGRAM_TOKEN}"
+    try:
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"✅ Webhook ustawiony na: {webhook_url}")
+    except Exception as e:
+        logger.exception("Nie udało się ustawić webhooka: %s", e)
+else:
+    logger.warning("⚠️ Brak RENDER_EXTERNAL_URL — webhook nie został ustawiony")
+
+# === BAZA DANYCH ===
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -88,8 +99,7 @@ def fetch_latest_from_x(username, bearer_token, since_id=None):
     if user.status_code != 200:
         logger.warning("Błąd pobierania usera z X: %s", user.text[:200])
         return []
-    user = user.json()
-    user_id = user.get("data", {}).get("id")
+    user_id = user.json().get("data", {}).get("id")
     if not user_id:
         return []
     params = {"max_results": 5, "tweet.fields": "created_at,text"}
@@ -120,16 +130,14 @@ def x_poll_job():
             uid = f"x:{tid}"
             if was_sent(uid):
                 continue
-            text = t["text"]
-            url = t["url"]
-            message = f"📰 Nowy wpis z X ({X_USERNAME}):\n\n{text}\n\n{url}"
+            message = f"📰 Nowy wpis z X ({X_USERNAME}):\n\n{t['text']}\n\n{t['url']}"
             try:
                 bot.send_message(TARGET_CHAT_ID, message)
                 mark_sent(uid, "x")
                 last_seen_x_id = tid
                 logger.info("Wysłano wpis X %s", tid)
             except TelegramError as e:
-                logger.exception("Błąd wysyłki do Telegram: %s", e)
+                logger.exception("Błąd wysyłki do Telegrama: %s", e)
     except Exception as e:
         logger.exception("Błąd w x_poll_job: %s", e)
 
@@ -138,7 +146,6 @@ def fetch_forex_today():
     try:
         res = requests.get(FOREX_FACTORY_URL, params={"day": "today"}, timeout=15)
         if res.status_code != 200:
-            logger.warning("ForexFactory HTTP %s", res.status_code)
             return []
         soup = BeautifulSoup(res.text, "html.parser")
         rows = soup.select("table#calendar tbody tr")
@@ -154,18 +161,13 @@ def fetch_forex_today():
             actual = tds[4].get_text(strip=True)
             forecast = tds[5].get_text(strip=True)
             impact_l = impact.lower()
-            if any(k in impact_l for k in ("med", "m", "yellow", "high", "h", "important", "red")) or impact_l:
-                if ("low" in impact_l) or ("low-impact" in impact_l):
+            if any(k in impact_l for k in ("med", "high", "important", "red")):
+                if "low" in impact_l:
                     continue
                 eid = f"ff:{date.today().isoformat()}:{currency}:{event}:{time_txt}"
                 events.append({
-                    "id": eid,
-                    "time": time_txt,
-                    "currency": currency,
-                    "impact": impact,
-                    "event": event,
-                    "actual": actual,
-                    "forecast": forecast
+                    "id": eid, "time": time_txt, "currency": currency, "impact": impact,
+                    "event": event, "actual": actual, "forecast": forecast
                 })
         return events
     except Exception as e:
@@ -175,12 +177,7 @@ def fetch_forex_today():
 # === AI ANALYSIS ===
 def analyze_event_with_ai(event):
     prompt = f"""
-Jesteś asystentem rynkowym. W kilku (2-4) krótkich zdaniach po polsku:
-- opisz znaczenie wydarzenia ekonomicznego dla rynków walutowych,
-- wskaż możliwy kierunek wpływu na odpowiednią walutę (np. umocnienie/ osłabienie),
-- oceń krótkoterminowy poziom zmienności (niski/średni/wysoki).
-
-Dane wydarzenia:
+Jesteś asystentem rynkowym. W kilku zdaniach po polsku opisz znaczenie wydarzenia:
 Nazwa: {event.get('event')}
 Waluta: {event.get('currency')}
 Impact: {event.get('impact')}
@@ -199,56 +196,59 @@ Actual: {event.get('actual')}
                 max_tokens=160,
                 temperature=0.2,
             )
-            text = resp["choices"][0]["message"]["content"].strip()
-            return text
+            return resp["choices"][0]["message"]["content"].strip()
     except Exception as e:
         logger.exception("OpenAI error: %s", e)
-
-    cur = event.get("currency", "")
-    ev = event.get("event", "")
-    direction = "możliwe większe wahania"
-    if "cpi" in ev.lower() or "inflation" in ev.lower():
-        direction = f"możliwe umocnienie {cur} jeśli dane będą powyżej oczekiwań, osłabienie jeśli poniżej."
-    elif "unemployment" in ev.lower() or "job" in ev.lower() or "nfp" in ev.lower():
-        direction = f"duży wpływ na rynek pracy i {cur}, zwiększona zmienność."
-    elif "gdp" in ev.lower():
-        direction = f"długoterminowy wpływ na kondycję gospodarki i {cur}."
-    return f"{event.get('event')} ({cur}) — {direction} Krótkoterminowo spodziewana zmienność: wysoka."
+    return f"{event.get('event')} ({event.get('currency')}) — możliwe wahania, szczególnie przy odchyleniach od prognoz."
 
 # === FOREX DAILY JOB ===
 def forex_daily_job():
     try:
         events = fetch_forex_today()
         if not events:
-            bot.send_message(TARGET_CHAT_ID, "📅 ForexFactory: brak wydarzeń medium/high lub błąd pobierania.")
+            bot.send_message(TARGET_CHAT_ID, "📅 ForexFactory: brak wydarzeń medium/high.")
             return
-        lines = ["📊 <b>ForexFactory — dzisiejsze wydarzenia (żółte/czerwone):</b>\n"]
+        lines = ["📊 <b>ForexFactory — dzisiejsze wydarzenia:</b>\n"]
         for e in events:
             if was_sent(e["id"]):
                 continue
             analysis = analyze_event_with_ai(e)
-            lines.append(f"<b>{e['time']} | {e['currency']} | {e['impact']}</b>\n{e['event']}\nPrognoza: {e.get('forecast','-')} | Wynik: {e.get('actual','-')}\n\n{analysis}\n---\n")
+            lines.append(f"<b>{e['time']} | {e['currency']} | {e['impact']}</b>\n{e['event']}\n{analysis}\n---\n")
             mark_sent(e["id"], "forex")
-        message = "\n".join(lines)
-        bot.send_message(TARGET_CHAT_ID, message, parse_mode=ParseMode.HTML)
+        bot.send_message(TARGET_CHAT_ID, "\n".join(lines), parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.exception("Błąd w forex_daily_job: %s", e)
-        try:
-            bot.send_message(TARGET_CHAT_ID, "Błąd podczas pobierania/analizy ForexFactory.")
-        except Exception:
-            pass
 
-# === /STATUS KOMENDA (TELEGRAM + HTTP) ===
-def status_command(update: Update, context):
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    msg = (
-        f"✅ Bot działa!\n"
-        f"Czas serwera: {now}\n"
-        f"Scheduler: aktywny ✅\n"
-        f"X użytkownik: {X_USERNAME or 'brak'}\n"
-        f"ForexFactory: {FOREX_FACTORY_URL}"
-    )
-    update.message.reply_text(msg)
+# === FLASK (keep alive + webhook) ===
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Bot is running and responding!", 200
+
+@app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
+def telegram_webhook():
+    update = request.get_json(force=True)
+    message = update.get("message", {})
+    text = message.get("text", "")
+    chat_id = message.get("chat", {}).get("id")
+
+    if not text or not chat_id:
+        return "No data", 200
+
+    text_lower = text.strip().lower()
+
+    if text_lower == "/status":
+        bot.send_message(chat_id, "✅ Bot działa poprawnie. Harmonogram aktywny.")
+    elif text_lower == "/help":
+        bot.send_message(chat_id, "📋 Dostępne komendy:\n/status — sprawdź, czy bot działa\n/help — lista komend")
+    else:
+        bot.send_message(chat_id, "Nieznana komenda. Użyj /help.")
+    return "OK", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # === MAIN ===
 def main():
@@ -258,43 +258,12 @@ def main():
     scheduler.add_job(forex_daily_job, "cron", hour=FOREX_DAILY_HOUR, minute=0)
     scheduler.start()
     logger.info("Bot wystartował. Harmonogram uruchomiony.")
-
-    # Telegram webhook dispatcher (simple inline, no polling)
-    from telegram.ext import Dispatcher
-    dispatcher = Dispatcher(bot, None, workers=0)
-    dispatcher.add_handler(CommandHandler("status", status_command))
-
-    # Keep process alive
     try:
         while True:
             time.sleep(60)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Stopping...")
 
-# --- KEEP ALIVE FLASK SERVER ---
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "✅ Bot is running and responding!", 200
-
-@app.route('/status', methods=['GET'])
-def http_status():
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    return (
-        f"✅ Bot działa!\n"
-        f"Czas serwera: {now}\n"
-        f"Scheduler: aktywny ✅\n"
-        f"X użytkownik: {X_USERNAME or 'brak'}\n"
-        f"ForexFactory: {FOREX_FACTORY_URL}",
-        200
-    )
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
-
 if __name__ == "__main__":
-    t = threading.Thread(target=run_flask, daemon=True)
-    t.start()
+    threading.Thread(target=run_flask, daemon=True).start()
     main()
