@@ -7,12 +7,12 @@ import threading
 from datetime import datetime, date
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot, ParseMode
+from telegram import Bot, ParseMode, Update
 from telegram.error import TelegramError
+from telegram.ext import CommandHandler, Dispatcher
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import utc
-from flask import Flask
-from flask import request
+from flask import Flask, request
 
 # Optional OpenAI import - used only if OPENAI_API_KEY is set
 try:
@@ -172,7 +172,7 @@ def fetch_forex_today():
         logger.exception("Błąd przy pobieraniu FF: %s", e)
         return []
 
-# === AI ANALYSIS (Polish) ===
+# === AI ANALYSIS ===
 def analyze_event_with_ai(event):
     prompt = f"""
 Jesteś asystentem rynkowym. W kilku (2-4) krótkich zdaniach po polsku:
@@ -187,8 +187,6 @@ Impact: {event.get('impact')}
 Czas: {event.get('time')}
 Forecast: {event.get('forecast')}
 Actual: {event.get('actual')}
-
-Odpowiedz tylko i wyłącznie po polsku, maksymalnie 4 zdania.
 """
     try:
         if OPENAI_API_KEY and OPENAI_AVAILABLE:
@@ -208,16 +206,14 @@ Odpowiedz tylko i wyłącznie po polsku, maksymalnie 4 zdania.
 
     cur = event.get("currency", "")
     ev = event.get("event", "")
-    impact = event.get("impact", "").lower()
     direction = "możliwe większe wahania"
     if "cpi" in ev.lower() or "inflation" in ev.lower():
         direction = f"możliwe umocnienie {cur} jeśli dane będą powyżej oczekiwań, osłabienie jeśli poniżej."
     elif "unemployment" in ev.lower() or "job" in ev.lower() or "nfp" in ev.lower():
         direction = f"duży wpływ na rynek pracy i {cur}, zwiększona zmienność."
     elif "gdp" in ev.lower():
-        direction = f"długoterminowy wpływ na postrzeganie kondycji gospodarki i {cur}."
-    comment = f"{event.get('event')} ({event.get('currency')}) — {direction} Krótkoterminowo spodziewana zmienność: wysoka."
-    return comment
+        direction = f"długoterminowy wpływ na kondycję gospodarki i {cur}."
+    return f"{event.get('event')} ({cur}) — {direction} Krótkoterminowo spodziewana zmienność: wysoka."
 
 # === FOREX DAILY JOB ===
 def forex_daily_job():
@@ -242,6 +238,18 @@ def forex_daily_job():
         except Exception:
             pass
 
+# === /STATUS KOMENDA (TELEGRAM + HTTP) ===
+def status_command(update: Update, context):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    msg = (
+        f"✅ Bot działa!\n"
+        f"Czas serwera: {now}\n"
+        f"Scheduler: aktywny ✅\n"
+        f"X użytkownik: {X_USERNAME or 'brak'}\n"
+        f"ForexFactory: {FOREX_FACTORY_URL}"
+    )
+    update.message.reply_text(msg)
+
 # === MAIN ===
 def main():
     init_db()
@@ -250,39 +258,43 @@ def main():
     scheduler.add_job(forex_daily_job, "cron", hour=FOREX_DAILY_HOUR, minute=0)
     scheduler.start()
     logger.info("Bot wystartował. Harmonogram uruchomiony.")
+
+    # Telegram webhook dispatcher (simple inline, no polling)
+    from telegram.ext import Dispatcher
+    dispatcher = Dispatcher(bot, None, workers=0)
+    dispatcher.add_handler(CommandHandler("status", status_command))
+
+    # Keep process alive
     try:
         while True:
             time.sleep(60)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Stopping...")
 
-# --- KEEP ALIVE FLASK SERVER FOR RENDER ---
+# --- KEEP ALIVE FLASK SERVER ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "✅ Bot is running and responding!", 200
 
+@app.route('/status', methods=['GET'])
+def http_status():
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    return (
+        f"✅ Bot działa!\n"
+        f"Czas serwera: {now}\n"
+        f"Scheduler: aktywny ✅\n"
+        f"X użytkownik: {X_USERNAME or 'brak'}\n"
+        f"ForexFactory: {FOREX_FACTORY_URL}",
+        200
+    )
+
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    # disable Flask reloader in production-like environments
     app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 if __name__ == "__main__":
-    # start Flask in daemon thread so it doesn't block main()
     t = threading.Thread(target=run_flask, daemon=True)
     t.start()
-    # start bot (blocking)
-
-@app.route('/status', methods=['GET', 'POST'])
-def status():
-    """Prosta komenda testowa /status"""
-    try:
-        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        msg = f"✅ Bot działa!\nCzas serwera: {now}\nScheduler aktywny: TAK\nX: {X_USERNAME or 'brak'}\nForexFactory URL: {FOREX_FACTORY_URL}"
-        return msg, 200
-    except Exception as e:
-        return f"❌ Błąd statusu: {e}", 500
-
     main()
-
