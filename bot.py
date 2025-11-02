@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os
+import threading
+import os
 import time
 import sqlite3
 import logging
@@ -10,6 +12,8 @@ from telegram import Bot, ParseMode
 from telegram.error import TelegramError
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import utc
+from flask import Flask
+
 
 # Optional OpenAI import - used only if OPENAI_API_KEY is set
 try:
@@ -273,4 +277,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
