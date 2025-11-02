@@ -239,7 +239,7 @@ def telegram_webhook():
     text_lower = text.strip().lower()
 
     if text_lower == "/status":
-        bot.send_message(chat_id, "✅ Bot działa poprawnie. Harmonogram aktywny.")
+        bot.send_message(chat_id, "✅Bot aktywny✅")
     elif text_lower == "/help":
         bot.send_message(chat_id, "📋 Dostępne komendy:\n/status — sprawdź, czy bot działa\n/help — lista komend")
     else:
@@ -267,3 +267,4 @@ def main():
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     main()
+
