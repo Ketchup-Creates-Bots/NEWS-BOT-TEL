@@ -12,6 +12,7 @@ from telegram.error import TelegramError
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import utc
 from flask import Flask
+from flask import request
 
 # Optional OpenAI import - used only if OPENAI_API_KEY is set
 try:
@@ -272,4 +273,16 @@ if __name__ == "__main__":
     t = threading.Thread(target=run_flask, daemon=True)
     t.start()
     # start bot (blocking)
+
+@app.route('/status', methods=['GET', 'POST'])
+def status():
+    """Prosta komenda testowa /status"""
+    try:
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        msg = f"✅ Bot działa!\nCzas serwera: {now}\nScheduler aktywny: TAK\nX: {X_USERNAME or 'brak'}\nForexFactory URL: {FOREX_FACTORY_URL}"
+        return msg, 200
+    except Exception as e:
+        return f"❌ Błąd statusu: {e}", 500
+
     main()
+
