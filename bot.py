@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 import os
-import threading
-import os
 import time
 import sqlite3
 import logging
+import threading
 from datetime import datetime, date
 import requests
 from bs4 import BeautifulSoup
@@ -13,9 +12,6 @@ from telegram.error import TelegramError
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import utc
 from flask import Flask
-import os
-import threading
-
 
 # Optional OpenAI import - used only if OPENAI_API_KEY is set
 try:
@@ -138,17 +134,12 @@ def x_poll_job():
 
 # === FOREX FACTORY SCRAPER ===
 def fetch_forex_today():
-    """
-    Pobiera wydarzenia z ForexFactory dla 'today'.
-    Filtruje wydarzenia z impactem (Medium/High) - FF używa różnych etykiet, dlatego dopasowujemy słownie.
-    """
     try:
         res = requests.get(FOREX_FACTORY_URL, params={"day": "today"}, timeout=15)
         if res.status_code != 200:
             logger.warning("ForexFactory HTTP %s", res.status_code)
             return []
         soup = BeautifulSoup(res.text, "html.parser")
-        # Uwaga: selektory mogą wymagać dopracowania jeśli strona się zmieni.
         rows = soup.select("table#calendar tbody tr")
         events = []
         for tr in rows:
@@ -161,10 +152,8 @@ def fetch_forex_today():
             event = tds[3].get_text(strip=True)
             actual = tds[4].get_text(strip=True)
             forecast = tds[5].get_text(strip=True)
-            # Filtrujemy: medium/important/high - różne warianty zapisu
             impact_l = impact.lower()
             if any(k in impact_l for k in ("med", "m", "yellow", "high", "h", "important", "red")) or impact_l:
-                # zachowamy tylko medium/high (żółte/czerwone)
                 if ("low" in impact_l) or ("low-impact" in impact_l):
                     continue
                 eid = f"ff:{date.today().isoformat()}:{currency}:{event}:{time_txt}"
@@ -184,11 +173,6 @@ def fetch_forex_today():
 
 # === AI ANALYSIS (Polish) ===
 def analyze_event_with_ai(event):
-    """
-    Używa OpenAI (jeśli dostępne) do wygenerowania krótkiego, rzeczowego komentarza po polsku.
-    Format odpowiedzi: 2-4 zdania, sugestia wpływu na główne pary walutowe i poziom ryzyka/zmienności.
-    Jeśli OpenAI nie jest dostępne - stosujemy prostą regułę fallback.
-    """
     prompt = f"""
 Jesteś asystentem rynkowym. W kilku (2-4) krótkich zdaniach po polsku:
 - opisz znaczenie wydarzenia ekonomicznego dla rynków walutowych,
@@ -207,7 +191,6 @@ Odpowiedz tylko i wyłącznie po polsku, maksymalnie 4 zdania.
 """
     try:
         if OPENAI_API_KEY and OPENAI_AVAILABLE:
-            # używamy ChatCompletion (gpt-4). Jeśli nie masz dostępu do gpt-4, możesz zmienić model na gpt-3.5-turbo.
             resp = openai.ChatCompletion.create(
                 model="gpt-4",
                 messages=[
@@ -222,7 +205,6 @@ Odpowiedz tylko i wyłącznie po polsku, maksymalnie 4 zdania.
     except Exception as e:
         logger.exception("OpenAI error: %s", e)
 
-    # Fallback: prosty rule-based komentarz po polsku
     cur = event.get("currency", "")
     ev = event.get("event", "")
     impact = event.get("impact", "").lower()
@@ -247,7 +229,6 @@ def forex_daily_job():
         for e in events:
             if was_sent(e["id"]):
                 continue
-            # Generate AI analysis
             analysis = analyze_event_with_ai(e)
             lines.append(f"<b>{e['time']} | {e['currency']} | {e['impact']}</b>\n{e['event']}\nPrognoza: {e.get('forecast','-')} | Wynik: {e.get('actual','-')}\n\n{analysis}\n---\n")
             mark_sent(e["id"], "forex")
@@ -264,37 +245,31 @@ def forex_daily_job():
 def main():
     init_db()
     scheduler = BackgroundScheduler(timezone=utc)
-    # Poll X every POLL_INTERVAL seconds
     scheduler.add_job(x_poll_job, "interval", seconds=POLL_INTERVAL, next_run_time=datetime.utcnow())
-    # Forex job daily at configured hour (UTC)
     scheduler.add_job(forex_daily_job, "cron", hour=FOREX_DAILY_HOUR, minute=0)
     scheduler.start()
     logger.info("Bot wystartował. Harmonogram uruchomiony.")
-    # Keep the process alive
     try:
         while True:
             time.sleep(60)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Stopping...")
 
-if __name__ == "__main__":
-    main()
-
-
+# --- KEEP ALIVE FLASK SERVER FOR RENDER ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running!", 200
+    return "✅ Bot is running and responding!", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # disable Flask reloader in production-like environments
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
+    # start Flask in daemon thread so it doesn't block main()
+    t = threading.Thread(target=run_flask, daemon=True)
+    t.start()
+    # start bot (blocking)
     main()
-
-
-
-
