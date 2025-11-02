@@ -277,5 +277,19 @@ def main():
 
 if __name__ == "__main__":
     main()
+def run_flask():
+    app = Flask(__name__)
+
+    @app.route('/')
+    def home():
+        return "✅ Bot działa poprawnie i jest aktywny!"
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+# Uruchom Flask w osobnym wątku, żeby nie blokował bota
+flask_thread = threading.Thread(target=run_flask)
+flask_thread.daemon = True
+flask_thread.start()
 
 
