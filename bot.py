@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from telegram import Bot, ParseMode
 from telegram.error import TelegramError
 from apscheduler.schedulers.background import BackgroundScheduler
+from pytz import utc
 
 # Optional OpenAI import - used only if OPENAI_API_KEY is set
 try:
@@ -256,7 +257,7 @@ def forex_daily_job():
 # === MAIN ===
 def main():
     init_db()
-    scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler(timezone=utc)
     # Poll X every POLL_INTERVAL seconds
     scheduler.add_job(x_poll_job, "interval", seconds=POLL_INTERVAL, next_run_time=datetime.utcnow())
     # Forex job daily at configured hour (UTC)
@@ -272,3 +273,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
